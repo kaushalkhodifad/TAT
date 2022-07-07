@@ -1,0 +1,319 @@
+SELECT
+	*
+FROM ((WITH whole2 AS (
+WITH whole1 AS (
+WITH whole AS (
+WITH base AS (
+						SELECT
+							(o.created_at at time zone 'Asia/Kolkata') order_date,
+							s.id store_id,
+							s.name store_name,
+							(
+								CASE WHEN sp.plan_id = 1 THEN
+									'Premium'
+								WHEN sp.plan_id = 2 THEN
+									'Premium'
+								WHEN sp.plan_id = 32 THEN
+									'Premium'
+								WHEN sp.plan_id = 33 THEN
+									'Free'
+								WHEN sp.plan_id = 34 THEN
+									'Infinity'
+								WHEN sp.plan_id = 35 THEN
+									'Lite'
+								END)::text "Plan",
+							sc.name category_name,
+							o.id order_id1,
+							CASE WHEN o.payment_mode = 0 THEN
+								'COD'
+							WHEN o.payment_mode = 1 THEN
+								'Online'
+							END payment_mode,
+							o.status current_order_status,
+							orderm.key AS order_status,
+							orderm.created_at status_timestamp,
+							lead(orderm.created_at,
+								1) OVER (PARTITION BY order_id ORDER BY orderm.created_at ASC) next_ts,
+							(extract(epoch FROM age(lead(orderm.created_at,
+							1) OVER (PARTITION BY order_id ORDER BY orderm.created_at ASC),
+						orderm.created_at)) / 3600) time_diff_hrs
+					FROM
+						optimus_order o
+						JOIN optimus_ordermeta orderm ON o.id = orderm.order_id
+						JOIN optimus_store s ON o.store_id = s.id
+						LEFT JOIN optimus_storemeta storemeta ON s.id = storemeta.store_id --just to remove test stores
+						LEFT JOIN optimus_store_categories scat ON scat.store_id = s.id
+						LEFT JOIN optimus_storecategory sc ON sc.id = scat.storecategory_id
+							AND sc.is_active = 'TRUE'
+					LEFT JOIN optimus_storeplan sp ON sp.store_id = s.id
+						AND sp.is_active = 'TRUE'
+						AND sp.is_deleted = 'FALSE'
+				WHERE
+					1 = 1
+					AND o.is_active = 'TRUE'
+					AND o.is_deleted = 'FALSE'
+					AND o.status >= 0
+					AND o.type in(0,
+					1)
+					AND storemeta.test_store IS NULL -- test stores removed
+					--and o.id = 3144484
+					--and o.id = 3144906
+					AND orderm.key NOT in(7,
+					11,
+					18,
+					15,
+					8,
+					26,
+					14,
+					45,
+					44,
+					40)
+					--and o.id = 2901498
+					AND(o.created_at at time zone 'Asia/Kolkata')::date BETWEEN date_trunc('month',
+					CURRENT_DATE - interval '1 month')
+					and(CURRENT_DATE - interval '2 day')::date ORDER BY
+						5
+)
+				SELECT DISTINCT
+					base.order_id1,
+					base.order_date,
+					payment_mode,
+					base.current_order_status,
+					base.store_id,
+					base.store_name,
+					base. "Plan",
+					base.category_name,
+					(max(base.status_timestamp) FILTER (WHERE base.order_status = 1) OVER (PARTITION BY base.order_id1)) accepted_ts,
+				(max(base.time_diff_hrs) FILTER (WHERE base.order_status = 0) OVER (PARTITION BY base.order_id1)) pending_hrs,
+			round(max(base.time_diff_hrs) FILTER (WHERE base.order_status = 1) OVER (PARTITION BY base.order_id1)) accepted_hrs,
+			round(max(base.time_diff_hrs) FILTER (WHERE base.order_status = 3) OVER (PARTITION BY base.order_id1)) shipped_hrs,
+			ship.* FROM base
+			JOIN (WITH main1 AS (WITH main AS (
+			SELECT
+				*,
+				lead(main.created_at,
+				1) OVER (PARTITION BY main.order_id ORDER BY main.created_at) next_ts FROM ((
+				SELECT
+					* FROM (
+					SELECT
+						ship.id ship_id,
+						ship.status current_ship_status,
+						(ship.created_at at time zone 'Asia/Kolkata') shipment_created_at,
+					ship.carrier third_party_carrier,
+					pick_flag.edge_flag,
+					ship.type,
+					ship.order_id,
+					CASE WHEN ss.status = 1 THEN
+						'Ready to ship'
+					WHEN ss.status = 2 THEN
+						'Pick up Requested'
+					WHEN ss.status = 3 THEN
+						'In transit'
+					WHEN ss.status = 4 THEN
+						'Delivered'
+					WHEN ss.status = 5 THEN
+						'On Hold'
+					WHEN ss.status = 6 THEN
+						'Rejected'
+					WHEN ss.status = 9 THEN
+						'Picked up'
+					WHEN ss.status = 10 THEN
+						'Returned'
+					WHEN ss.status = 11 THEN
+						'Undelivered'
+					WHEN ss.status = 12 THEN
+						'Cancelled by customer'
+					WHEN ss.status = 13 THEN
+						'Out for Delivery'
+					END status,
+					(ss.created_at at time zone 'Asia/Kolkata') created_at,
+				row_number() OVER (PARTITION BY ship.order_id,
+					ss.status ORDER BY ss.created_at ASC) r FROM optimus_shipment ship
+				LEFT JOIN optimus_shipmentstatus ss ON ship.id = ss.shipment_id
+				JOIN (
+				SELECT
+					q.order_id,
+					CASE WHEN q.pick_r > q.transit_r THEN
+						0
+					ELSE
+						1
+					END edge_flag -- 0 for edge case
+					FROM (
+					SELECT
+						p.order_id,
+						max(p.r) FILTER (WHERE p.status = 2) pick_r,
+						max(p.r) FILTER (WHERE p.status = 3) transit_r FROM (
+						SELECT
+							ship.id ship_id,
+							ship.status current_ship_status,
+							ship.created_at shipment_created_at,
+							ship.order_id,
+							ss.status,
+							ss.created_at,
+							row_number() OVER (PARTITION BY ship.id ORDER BY ss.created_at ASC) r FROM optimus_shipment ship
+							LEFT JOIN optimus_shipmentstatus ss ON ship.id = ss.shipment_id WHERE 1 = 1) p
+					GROUP BY
+						1) q) pick_flag ON pick_flag.order_id = ship.order_id WHERE 1 = 1
+				AND ship.is_external_shipment = 'FALSE'
+				AND ship.is_deleted = FALSE
+				AND lower(ship.carrier)
+				NOT in('usps',
+				'bewakoof')
+				AND ship.status <> 15 ORDER BY
+					date_trunc('day',
+					ship.created_at)) early_ts WHERE r = 1)) main WHERE ( CASE WHEN edge_flag = 0 THEN
+			status <> 'Pick up Requested'
+		WHEN edge_flag = 1 THEN
+			status in('Ready to ship',
+			'Pick up Requested',
+			'In transit',
+			'Delivered',
+			'On Hold',
+			'Rejected',
+			'Picked up',
+			'Returned',
+			'Undelivered',
+			'Cancelled by customer',
+			'Out for Delivery')
+		END))
+SELECT
+	main.ship_id,
+	main.shipment_created_at,
+	main.order_id,
+	main.status,
+	main.third_party_carrier,
+	main.current_ship_status,
+	main.created_at,
+	main.next_ts,
+	main.type,
+	(extract(epoch FROM age(main.next_ts,
+	main.created_at)) / 3600) time_diff_hrs FROM main ORDER BY
+	2 ASC
+)
+SELECT DISTINCT
+	main1.ship_id,
+	main1.shipment_created_at,
+	main1.current_ship_status,
+	main1.order_id,
+	main1.third_party_carrier,
+	main1.type,
+	max(main1.created_at) FILTER (WHERE main1.status = 'Ready to ship') OVER (PARTITION BY main1.order_id) rts_ts,
+	max(main1.created_at) FILTER (WHERE main1.status = 'Pick up Requested') OVER (PARTITION BY main1.order_id) pur_ts,
+	max(main1.created_at) FILTER (WHERE main1.status = 'Picked up') OVER (PARTITION BY main1.order_id) picked_up_ts,
+	max(main1.created_at) FILTER (WHERE main1.status = 'In transit') OVER (PARTITION BY main1.order_id) in_transit_ts,
+	max(main1.created_at) FILTER (WHERE main1.status = 'Out for Delivery'
+		AND TYPE <> 'reverse') OVER (PARTITION BY main1.order_id) out_for_delivery_ts,
+	max(main1.created_at) FILTER (WHERE main1.status = 'Delivered') OVER (PARTITION BY main1.order_id) delivered_ts,
+	round(max(main1.time_diff_hrs) FILTER (WHERE main1.status = 'Ready to ship') OVER (PARTITION BY main1.order_id)) "Ready to ship(hrs)",
+	round(max(main1.time_diff_hrs) FILTER (WHERE main1.status = 'Pick up Requested') OVER (PARTITION BY main1.order_id)) "Pick requested(hrs)",
+	round((max(main1.time_diff_hrs) FILTER (WHERE main1.status = 'Picked up') OVER (PARTITION BY main1.order_id))::numeric,
+2) "Picked up (hrs)"
+	--round(max(main1.time_diff_hrs) filter (where main1.status = 'In transit') over (partition by main1.order_id)) "In transit(hrs)"
+	FROM main1 WHERE 1 = 1 ORDER BY
+		order_id) ship ON base.order_id1 = ship.order_id
+)
+SELECT
+	order_id,
+	order_date,
+	store_id,
+	store_name,
+	"Plan",
+	category_name,
+	third_party_carrier,
+	payment_mode,
+	current_order_status,
+	shipment_created_at,
+	ship_id,
+	TYPE,
+	round(pending_hrs::numeric,
+	2) pending_hrs,
+	round(accepted_hrs::numeric,
+	2) "accepted_to_shipped(hrs)",
+	current_ship_status,
+	rts_ts,
+	pur_ts,
+	picked_up_ts,
+	in_transit_ts,
+	out_for_delivery_ts,
+	delivered_ts,
+	"Ready to ship(hrs)",
+	"Pick requested(hrs)",
+	"Picked up (hrs)",
+	row_number() OVER (PARTITION BY order_id ORDER BY shipment_created_at ASC) r FROM whole
+)
+SELECT
+	* FROM whole1 WHERE r = 1
+)
+SELECT
+	whole2.*,
+	current_ship_status_1.current_ship_status current_ship_status_1,
+	CASE WHEN current_ship_status_1.is_external_shipment = FALSE THEN
+		1
+	WHEN current_ship_status_1.is_external_shipment = TRUE THEN
+		0
+	END AS is_external_shipment_num,
+	current_ship_status_1.is_active ship_active,
+	current_ship_status_1.is_external_shipment,
+	current_ship_status_1.ship_type,
+	( CASE WHEN current_ship_status_1.ship_type = 'reverse' THEN
+		current_ship_status_1.shipment_created_at
+	END) rev_created_at,
+round( CASE WHEN current_ship_status_1.current_ship_status <> 13 THEN
+(extract(epoch FROM age(coalesce(whole2.delivered_ts,
+current_ship_status_1.shipment_created_at),
+whole2.out_for_delivery_ts)) / 3600)
+END) "Out of Delivery(hrs)",
+round( CASE WHEN current_ship_status_1.current_ship_status in(3,
+13,
+11)
+	AND current_ship_status_1.ship_type = 'reverse' THEN
+	(extract(epoch FROM age(coalesce(whole2.out_for_delivery_ts,
+	current_ship_status_1.shipment_created_at),
+whole2.in_transit_ts)) / 3600)
+WHEN current_ship_status_1.current_ship_status in(3,
+13,
+4)
+	AND current_ship_status_1.ship_type = 'forward' THEN
+	(extract(epoch FROM age(coalesce(whole2.out_for_delivery_ts,
+	whole2.delivered_ts),
+whole2.in_transit_ts)) / 3600)
+END) "In transit(hrs)",
+round(extract(epoch FROM age(coalesce(picked_up_ts,
+in_transit_ts),
+order_date)) / 3600) o2p,
+round(extract(epoch FROM age(coalesce(picked_up_ts,
+in_transit_ts),
+whole2.shipment_created_at)) / 3600) s2p,
+(now() at time zone 'Asia/Kolkata') last_refreshed_time FROM whole2
+JOIN (
+SELECT
+	* FROM (
+	SELECT
+		ship.id ship_id,
+		ship.status current_ship_status,
+		o.id order_id,
+		ship.is_external_shipment,
+		ship.type ship_type,
+		(ship.created_at at time zone 'Asia/Kolkata') shipment_created_at,
+	ship.carrier third_party_carrier,
+	ship.is_active,
+	row_number() OVER (PARTITION BY ship.order_id ORDER BY ship.created_at DESC) r2 FROM optimus_shipment ship
+	JOIN optimus_order o ON ship.order_id = o.id WHERE 1 = 1
+		AND ship.is_deleted = FALSE
+		AND lower(ship.carrier)
+		NOT in('usps',
+		'bewakoof')
+		ORDER BY
+			date_trunc('day',
+			ship.created_at)) single_forward WHERE r2 = 1) current_ship_status_1 ON current_ship_status_1.order_id = whole2.order_id WHERE whole2.ship_id NOT in(
+	SELECT
+		ship.id FROM optimus_shipment ship
+	JOIN optimus_order o ON o.id = ship.order_id WHERE o.status in(0,
+	1,
+	2,
+	4,
+	6,
+	7)
+	AND ship.id IS NOT NULL)
+	AND current_ship_status_1.current_ship_status <> 15)
+) p WHERE is_external_shipment = FALSE;
